@@ -4,6 +4,7 @@
 
 from openai import AzureOpenAI
 import re
+import requests,socket
 
 ROLE = """
 When requested to write code, pick Python.
@@ -15,6 +16,31 @@ So exclude always BODY, HEAD and HTML .
 
 MODEL = "gpt-35-turbo"
 AI = None
+
+SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/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"
+
+def notify_slack(message="Hello, World"):
+    payload = {"text": message}
+    response = requests.post(SLACK_WEBHOOK_URL, json=payload)
+    if response.status_code != 200:
+        print(f"Errore durante l'invio della notifica Slack: {response.text}")
+    else:
+        print(f"Notifica Slack inviata: {message}")
+
+def get_chess_puzzle():
+    url = "https://pychess.run.goorm.io/api/puzzle?limit=1"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            if data and len(data) > 0:
+                puzzle = data[0]
+                fen = puzzle.get('fen', 'N/A')
+                return fen
+    except Exception as e:
+        print(f"Errore durante la richiesta del puzzle di scacchi: {e}")
+    return "Impossibile ottenere il puzzle"
+    
 
 def req(msg):
     return [{"role": "system", "content": ROLE}, 
@@ -37,6 +63,51 @@ text = Path("util/test/code.txt").read_text()
 """
 def extract(text):
     res = {}
+
+    # Aggiunta della ricerca di email
+    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]{2,}\b'
+    emails = re.findall(email_pattern, text, re.IGNORECASE)
+    if emails:
+        res['email'] = emails
+        for email in emails:
+            print(f"Rilevato indirizzo email nell'input: {email}")
+            notify_slack()
+        return res
+    
+    # Aggiunta della verifica e risoluzione del dominio in indirizzo IP
+    domain_pattern = r'\b((?!-)[A-Za-z0-9-]{1,63}(?<!-)\.)+[A-Za-z]{2,6}\b'
+    domains = re.findall(domain_pattern, text, re.IGNORECASE)
+    if domains:
+        for domain in domains:
+            try:
+                ip = socket.gethostbyname(domain)
+                res['domain'] = domain
+                res['ip'] = ip
+                print(f"Rilevato dominio {domain} con IP: {ip}")
+                notify_slack()
+            except socket.gaierror:
+                print(f"Impossibile risolvere il dominio: {domain}")
+        return res
+    
+    # Utilizzo di un pattern regex per verificare se la richiesta riguarda scacchi
+    chess_pattern = r'\bchess\b|\bscacchi\b'
+    if "chess" in text.lower() or "scacchi" in text.lower():
+        # Formulazione della domanda per ChatGPT
+        chess_question = f"is the following a request for a chess puzzle: \"{text}\": Answer yes or no."
+        chatgpt_response = ask(chess_question)       
+        # Interpretazione della risposta di ChatGPT
+        if "yes" in chatgpt_response.lower():
+            notify_slack(f"Richiesta di scacchi ricevuta: {text}")
+            fen = get_chess_puzzle()
+            if fen != "Impossibile ottenere il puzzle":
+                res['chess'] = fen
+                notify_slack(f"Puzzle di scacchi generato: {fen}")
+            else:
+                print(fen)  
+        else:
+            print("La richiesta non è stata interpretata come una richiesta di puzzle di scacchi.")
+        
+    return res
 
     # search for a chess position
     pattern = r'(([rnbqkpRNBQKP1-8]{1,8}/){7}[rnbqkpRNBQKP1-8]{1,8} [bw] (-|K?Q?k?q?) (-|[a-h][36]) \d+ \d+)'
@@ -71,14 +142,21 @@ def main(args):
 
     input = args.get("input", "")
     if input == "":
-        res = {
+        e_res = {
             "output": "Welcome to the OpenAI demo chat",
             "title": "OpenAI Chat",
             "message": "You can chat with OpenAI."
         }
     else:
         output = ask(input)
-        res = extract(output)
-        res['output'] = output
+        e_res = extract(output)
+        # Controlla se sono stati estratti dominio e IP
+        domain = e_res.get('domain')
+        ip = e_res.get('ip')
+        if domain and ip:
+            output = ask(f"Assuming {domain} has IP address {ip}, answer to this question: {input}")
+        puzzle = e_res.get('chess')
 
-    return {"body": res }
+        e_res['output'] = output
+
+    return {"body": e_res }
